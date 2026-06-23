@@ -83,6 +83,27 @@ function sellwin_register_routes(): void
     $controller->register_routes();
 }
 
+// CORS headers for sellwin API routes
+add_action('rest_api_init', function () {
+    $allowed_origins = [
+        'http://localhost:4200',
+        'https://dulcet-entremet-dc75a1.netlify.app',
+    ];
+    $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+    if (in_array($origin, $allowed_origins, true)) {
+        header('Access-Control-Allow-Origin: ' . $origin);
+        header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+        header('Access-Control-Allow-Headers: Content-Type, Authorization');
+        header('Access-Control-Allow-Credentials: true');
+    }
+
+    // Handle preflight OPTIONS requests
+    if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+        status_header(200);
+        exit;
+    }
+}, 0);
+
 // Register public health-check endpoint with no auth
 add_action('rest_api_init', function () {
     register_rest_route('sellwin/v1', '/health', [
@@ -266,3 +287,55 @@ function sellwin_sync_session_login($user_login, $user): void
 // Admin menu
 add_action('admin_menu', ['Sellwin_Admin', 'add_admin_menu']);
 add_filter('plugin_action_links_' . plugin_basename(__FILE__), ['Sellwin_Admin', 'add_action_links']);
+
+// Invoice PDF endpoint (non-REST, returns HTML or PDF)
+add_action('init', function () {
+    if (isset($_GET['sellwin_invoice']) && isset($_GET['order_id'])) {
+        $order_id = (int) $_GET['order_id'];
+        $key    = $_GET['consumer_key'] ?? '';
+        $secret = $_GET['consumer_secret'] ?? '';
+
+        // Verify WC API key
+        if (function_exists('wc_api_hash') && !empty($key) && !empty($secret)) {
+            global $wpdb;
+            $table = $wpdb->prefix . 'woocommerce_api_keys';
+            $hashed_key = wc_api_hash($key);
+            $row = $wpdb->get_row($wpdb->prepare(
+                "SELECT consumer_secret FROM {$table} WHERE consumer_key = %s LIMIT 1",
+                $hashed_key
+            ));
+            if (!$row || !hash_equals($row->consumer_secret, wc_api_hash($secret))) {
+                wp_die('Unauthorized', 401);
+            }
+        } else {
+            wp_die('Invalid request', 401);
+        }
+
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            wp_die('Order not found', 404);
+        }
+
+        // Try WooCommerce PDF Invoices plugin (WP Overnight)
+        $wcpdf_classes = ['WooCommerce_PDF_Invoices', 'WooCommerce_PDF_Invoices_Premium'];
+        foreach ($wcpdf_classes as $cls) {
+            if (class_exists($cls) && function_exists('wcpdf_get_document')) {
+                try {
+                    $document = wcpdf_get_document('invoice', $order);
+                    if ($document) {
+                        $document->preview_or_download('download');
+                        exit;
+                    }
+                } catch (\Exception $e) {
+                    // Fall through to HTML
+                }
+            }
+        }
+
+        // HTML invoice fallback with print-to-PDF support
+        header('Content-Type: text/html; charset=utf-8');
+        header('Content-Disposition: inline; filename="invoice-' . $order->get_order_number() . '.html"');
+        Sellwin_Admin::render_html_invoice($order);
+        exit;
+    }
+});
