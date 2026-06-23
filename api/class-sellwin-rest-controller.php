@@ -304,7 +304,8 @@ class Sellwin_REST_Controller
 
     public function get_active_carts(WP_REST_Request $request): WP_REST_Response
     {
-        $carts = $this->db->get_active_carts();
+        $minutes = max(1, (int) ($request->get_param('minutes') ?: 5));
+        $carts = $this->db->get_active_carts($minutes);
 
         $data = array_map(function ($cart) {
             $last_activity = strtotime($cart->last_activity);
@@ -328,7 +329,69 @@ class Sellwin_REST_Controller
 
     public function get_abandoned_carts(WP_REST_Request $request): WP_REST_Response
     {
-        $carts = $this->db->get_abandoned_carts();
+        global $wpdb;
+
+        $filter   = sanitize_text_field($request->get_param('filter') ?: 'all');
+        $search   = sanitize_text_field($request->get_param('search') ?: '');
+        $sort     = sanitize_text_field($request->get_param('sort') ?: 'last_activity');
+        $order    = strtoupper(sanitize_text_field($request->get_param('order') ?: 'DESC')) === 'ASC' ? 'ASC' : 'DESC';
+        $per_page = min(100, max(1, (int) ($request->get_param('per_page') ?: 50)));
+        $page     = max(1, (int) ($request->get_param('page') ?: 1));
+        $offset   = ($page - 1) * $per_page;
+
+        $table      = $this->db->get_table('carts');
+        $s_table    = $wpdb->prefix . 'sellwin_sessions';
+        $wc_orders  = $wpdb->prefix . 'posts';
+
+        // Build WHERE
+        $where_parts = ["c.status = 'active'", "c.converted_to_order_id = 0"];
+        $params = [];
+
+        // Time filter
+        $minutes_filter = $this->parse_filter_minutes($filter);
+        if ($minutes_filter > 0) {
+            $threshold = date('Y-m-d H:i:s', strtotime("-{$minutes_filter} minutes"));
+            $where_parts[] = 'c.last_activity < %s';
+            $params[] = $threshold;
+        } elseif ($filter === 'today') {
+            $where_parts[] = 'c.last_activity < %s';
+            $params[] = current_time('Y-m-d') . ' 00:00:00';
+        } elseif ($filter === 'week') {
+            $where_parts[] = 'c.last_activity < %s';
+            $params[] = date('Y-m-d', strtotime('monday this week')) . ' 00:00:00';
+        }
+        // 'all' = no time constraint
+
+        // Search
+        if ($search) {
+            $where_parts[] = '(c.mobile LIKE %s OR c.name LIKE %s)';
+            $pattern = '%' . $wpdb->esc_like($search) . '%';
+            $params[] = $pattern;
+            $params[] = $pattern;
+        }
+
+        $where_sql = implode(' AND ', $where_parts);
+
+        // Sort mapping
+        $sort_map = [
+            'last_activity' => 'c.last_activity',
+            'cart_value'    => 'c.cart_value',
+            'product_count' => 'c.product_count',
+            'name'          => 'c.name',
+            'mobile'        => 'c.mobile',
+        ];
+        $sort_col = $sort_map[$sort] ?? 'c.last_activity';
+
+        // Count
+        $count_sql = "SELECT COUNT(*) FROM {$table} c WHERE {$where_sql}";
+        $total = empty($params) ? (int) $wpdb->get_var($count_sql) : (int) $wpdb->get_var($wpdb->prepare($count_sql, ...$params));
+        $total_pages = max(1, (int) ceil($total / $per_page));
+
+        // Fetch
+        $params[] = $per_page;
+        $params[] = $offset;
+        $data_sql = "SELECT c.* FROM {$table} c WHERE {$where_sql} ORDER BY {$sort_col} {$order} LIMIT %d OFFSET %d";
+        $carts = $wpdb->get_results($wpdb->prepare($data_sql, ...$params));
 
         $data = array_map(function ($cart) {
             $last_activity = strtotime($cart->last_activity);
@@ -358,7 +421,23 @@ class Sellwin_REST_Controller
             ];
         }, $carts);
 
-        return new WP_REST_Response($data, 200);
+        return new WP_REST_Response([
+            'carts'      => $data,
+            'total'      => $total,
+            'page'       => $page,
+            'perPage'    => $per_page,
+            'totalPages' => $total_pages,
+        ], 200);
+    }
+
+    private function parse_filter_minutes(string $filter): int
+    {
+        $map = [
+            '5min'  => 5,
+            '10min' => 10,
+            '30min' => 30,
+        ];
+        return $map[$filter] ?? 0;
     }
 
     public function get_customer(WP_REST_Request $request): WP_REST_Response
