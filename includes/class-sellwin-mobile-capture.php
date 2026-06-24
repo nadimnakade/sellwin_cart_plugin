@@ -5,7 +5,7 @@ class Sellwin_Mobile_Capture
 {
     public static function enqueue_assets(): void
     {
-        if (!function_exists('is_product') || !is_product()) {
+        if (!function_exists('is_woocommerce') || !is_woocommerce() && !is_cart() && !is_checkout() && !is_account_page()) {
             return;
         }
 
@@ -68,6 +68,14 @@ class Sellwin_Mobile_Capture
             'name'       => $name,
             'ip_address' => $_SERVER['REMOTE_ADDR'] ?? '',
         ]);
+
+        // Link any existing carts for this session with the mobile number
+        global $wpdb;
+        $wpdb->update(
+            $wpdb->prefix . 'sellwin_carts',
+            ['mobile' => $mobile, 'name' => $name],
+            ['session_key' => $session_key, 'mobile' => '']
+        );
 
         if (is_user_logged_in()) {
             $user_id = get_current_user_id();

@@ -99,15 +99,17 @@ class Sellwin_Admin
         $abandoned_minutes = (int) get_option('sellwin_abandoned_minutes', 5);
         $threshold = date('Y-m-d H:i:s', strtotime("-{$abandoned_minutes} minutes"));
 
-        $active_carts = (int) $wpdb->get_var(
-            "SELECT COUNT(DISTINCT session_id) FROM {$wpdb->prefix}sellwin_carts
-             WHERE updated_at >= '{$threshold}' AND is_active = 1"
-        );
+        $active_carts = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(DISTINCT session_key) FROM {$wpdb->prefix}sellwin_carts
+             WHERE last_activity >= %s AND status = 'active' AND converted_to_order_id = 0",
+            $threshold
+        ));
 
-        $abandoned_carts = (int) $wpdb->get_var(
-            "SELECT COUNT(DISTINCT session_id) FROM {$wpdb->prefix}sellwin_carts
-             WHERE updated_at < '{$threshold}' AND is_active = 1"
-        );
+        $abandoned_carts = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(DISTINCT session_key) FROM {$wpdb->prefix}sellwin_carts
+             WHERE last_activity < %s AND status = 'active' AND converted_to_order_id = 0",
+            $threshold
+        ));
 
         $total_sessions = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->prefix}sellwin_sessions");
         $total_events   = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->prefix}sellwin_events");
@@ -156,11 +158,10 @@ class Sellwin_Admin
         $country_code = get_option('sellwin_whatsapp_country_code', '91');
 
         $carts = $wpdb->get_results($wpdb->prepare(
-            "SELECT c.*, s.mobile, s.customer_name, s.woocommerce_user_id
+            "SELECT c.*
              FROM {$wpdb->prefix}sellwin_carts c
-             LEFT JOIN {$wpdb->prefix}sellwin_sessions s ON c.session_id = s.session_id
-             WHERE c.updated_at >= %s AND c.is_active = 1
-             ORDER BY c.updated_at DESC",
+             WHERE c.last_activity >= %s AND c.status = 'active' AND c.converted_to_order_id = 0
+             ORDER BY c.last_activity DESC",
             $threshold
         ));
         ?>
@@ -174,18 +175,10 @@ class Sellwin_Admin
                     <thead><tr><th>Customer</th><th>Mobile</th><th>Products</th><th>Cart Value</th><th>Last Activity</th><th>WhatsApp</th></tr></thead>
                     <tbody>
                     <?php foreach ($carts as $c) :
-                        $products = $wpdb->get_var($wpdb->prepare(
-                            "SELECT COUNT(*) FROM {$wpdb->prefix}sellwin_events WHERE session_id = %s AND event_type IN ('add_to_cart', 'cart_update')",
-                            $c->session_id
-                        ));
-                        $cart_value = (float) $wpdb->get_var($wpdb->prepare(
-                            "SELECT COALESCE(SUM(CAST(meta_value AS DECIMAL(10,2))), 0) FROM {$wpdb->prefix}sellwin_events WHERE session_id = %s AND event_type = 'add_to_cart' AND meta_key = 'price'",
-                            $c->session_id
-                        ));
-                        $ago = human_time_diff(strtotime($c->updated_at), current_time('timestamp')) . ' ago';
+                        $ago = human_time_diff(strtotime($c->last_activity), current_time('timestamp')) . ' ago';
                     ?>
                         <tr>
-                            <td><?php echo esc_html($c->customer_name ?: 'Guest'); ?></td>
+                            <td><?php echo esc_html($c->name ?: 'Guest'); ?></td>
                             <td>
                                 <?php if ($c->mobile) : ?>
                                     <a href="https://wa.me/<?php echo esc_attr($country_code . $c->mobile); ?>" target="_blank" style="text-decoration:none;color:#25D366;font-weight:600;" title="Chat on WhatsApp">
@@ -195,8 +188,8 @@ class Sellwin_Admin
                                     —
                                 <?php endif; ?>
                             </td>
-                            <td><?php echo (int) $products; ?></td>
-                            <td>₹<?php echo number_format($cart_value, 0, '.', ','); ?></td>
+                            <td><?php echo (int) $c->product_count; ?></td>
+                            <td>₹<?php echo number_format((float) $c->cart_value, 0, '.', ','); ?></td>
                             <td><?php echo $ago; ?></td>
                             <td>
                                 <?php if ($c->mobile) : ?>
@@ -219,9 +212,9 @@ class Sellwin_Admin
         global $wpdb;
 
         $country_code = get_option('sellwin_whatsapp_country_code', '91');
-        $filter   = sanitize_text_field($_GET['filter'] ?? '30min');
+        $filter   = sanitize_text_field($_GET['filter'] ?? '5min');
         $search   = sanitize_text_field($_GET['s'] ?? '');
-        $sort     = sanitize_text_field($_GET['sort'] ?? 'updated_at');
+        $sort     = sanitize_text_field($_GET['sort'] ?? 'last_activity');
         $order    = strtoupper(sanitize_text_field($_GET['order'] ?? 'DESC')) === 'ASC' ? 'ASC' : 'DESC';
         $per_page = 20;
         $page     = max(1, (int) ($_GET['paged'] ?? 1));
@@ -237,38 +230,37 @@ class Sellwin_Admin
         ];
 
         if (!isset($filters[$filter])) {
-            $filter = '30min';
+            $filter = '5min';
         }
 
-        $allowed_sorts = ['updated_at', 'cart_value', 'product_count', 'customer_name', 'mobile'];
+        $allowed_sorts = ['last_activity', 'cart_value', 'product_count', 'name', 'mobile'];
         if (!in_array($sort, $allowed_sorts, true)) {
-            $sort = 'updated_at';
+            $sort = 'last_activity';
         }
 
         // Build WHERE
-        $where_parts = ['c.is_active = 1'];
+        $where_parts = ["c.status = 'active'", "c.converted_to_order_id = 0"];
         $params = [];
 
         if ($filter === 'all') {
             // no time constraint
         } elseif ($filter === 'today') {
-            $where_parts[] = 'c.updated_at >= %s';
+            $where_parts[] = 'c.last_activity < %s';
             $params[] = current_time('Y-m-d') . ' 00:00:00';
         } elseif ($filter === 'week') {
             $monday = date('Y-m-d', strtotime('monday this week')) . ' 00:00:00';
-            $where_parts[] = 'c.updated_at >= %s';
+            $where_parts[] = 'c.last_activity < %s';
             $params[] = $monday;
         } else {
             $minutes = $filters[$filter]['minutes'];
             $threshold = date('Y-m-d H:i:s', strtotime("-{$minutes} minutes"));
-            $where_parts[] = 'c.updated_at < %s';
+            $where_parts[] = 'c.last_activity < %s';
             $params[] = $threshold;
         }
 
         if ($search) {
-            $where_parts[] = '(s.mobile LIKE %s OR s.customer_name LIKE %s OR c.name LIKE %s)';
+            $where_parts[] = '(c.mobile LIKE %s OR c.name LIKE %s)';
             $search_pattern = '%' . $wpdb->esc_like($search) . '%';
-            $params[] = $search_pattern;
             $params[] = $search_pattern;
             $params[] = $search_pattern;
         }
@@ -276,26 +268,25 @@ class Sellwin_Admin
         $where_sql = implode(' AND ', $where_parts);
 
         // Count total
-        $count_sql = "SELECT COUNT(*) FROM {$wpdb->prefix}sellwin_carts c LEFT JOIN {$wpdb->prefix}sellwin_sessions s ON c.session_id = s.session_id WHERE {$where_sql}";
+        $count_sql = "SELECT COUNT(*) FROM {$wpdb->prefix}sellwin_carts c WHERE {$where_sql}";
         $total = empty($params) ? (int) $wpdb->get_var($count_sql) : (int) $wpdb->get_var($wpdb->prepare($count_sql, ...$params));
         $total_pages = max(1, ceil($total / $per_page));
 
         // Sort mapping
         $sort_map = [
-            'updated_at'    => 'c.updated_at',
+            'last_activity' => 'c.last_activity',
             'cart_value'    => 'c.cart_value',
             'product_count' => 'c.product_count',
-            'customer_name' => 's.customer_name',
-            'mobile'        => 's.mobile',
+            'name'          => 'c.name',
+            'mobile'        => 'c.mobile',
         ];
-        $sort_col = $sort_map[$sort] ?? 'c.updated_at';
+        $sort_col = $sort_map[$sort] ?? 'c.last_activity';
 
         // Fetch
         $params[] = $per_page;
         $params[] = $offset;
-        $data_sql = "SELECT c.*, s.mobile, s.customer_name, s.woocommerce_user_id
+        $data_sql = "SELECT c.*
                      FROM {$wpdb->prefix}sellwin_carts c
-                     LEFT JOIN {$wpdb->prefix}sellwin_sessions s ON c.session_id = s.session_id
                      WHERE {$where_sql}
                      ORDER BY {$sort_col} {$order}
                      LIMIT %d OFFSET %d";
@@ -343,11 +334,11 @@ class Sellwin_Admin
                 <table class="wp-list-table widefixed striped">
                     <thead>
                         <tr>
-                            <th style="width:180px;"><a href="<?php echo esc_url($sort_url('customer_name')); ?>">Customer<?php echo $sort_icon('customer_name'); ?></a></th>
+                            <th style="width:180px;"><a href="<?php echo esc_url($sort_url('name')); ?>">Customer<?php echo $sort_icon('name'); ?></a></th>
                             <th style="width:130px;"><a href="<?php echo esc_url($sort_url('mobile')); ?>">Phone<?php echo $sort_icon('mobile'); ?></a></th>
                             <th style="width:80px;"><a href="<?php echo esc_url($sort_url('product_count')); ?>">Products<?php echo $sort_icon('product_count'); ?></a></th>
                             <th style="width:100px;"><a href="<?php echo esc_url($sort_url('cart_value')); ?>">Cart Value<?php echo $sort_icon('cart_value'); ?></a></th>
-                            <th style="width:110px;"><a href="<?php echo esc_url($sort_url('updated_at')); ?>">Last Activity<?php echo $sort_icon('updated_at'); ?></a></th>
+                            <th style="width:110px;"><a href="<?php echo esc_url($sort_url('last_activity')); ?>">Last Activity<?php echo $sort_icon('last_activity'); ?></a></th>
                             <th>Cart Items</th>
                             <th style="width:160px;">Actions</th>
                         </tr>
@@ -355,14 +346,10 @@ class Sellwin_Admin
                     <tbody>
                     <?php foreach ($carts as $c) :
                         $events = $wpdb->get_results($wpdb->prepare(
-                            "SELECT product_name, quantity FROM {$wpdb->prefix}sellwin_events WHERE session_id = %s AND event_type IN ('add_to_cart', 'cart_update') ORDER BY created_at DESC",
-                            $c->session_id
+                            "SELECT product_name, quantity FROM {$wpdb->prefix}sellwin_events WHERE session_key = %s AND event_type IN ('add_to_cart', 'cart_update') ORDER BY created_at DESC",
+                            $c->session_key
                         ));
-                        $cart_value = (float) $wpdb->get_var($wpdb->prepare(
-                            "SELECT COALESCE(SUM(CAST(meta_value AS DECIMAL(10,2))), 0) FROM {$wpdb->prefix}sellwin_events WHERE session_id = %s AND event_type = 'add_to_cart' AND meta_key = 'price'",
-                            $c->session_id
-                        ));
-                        $ago = human_time_diff(strtotime($c->updated_at), current_time('timestamp'));
+                        $ago = human_time_diff(strtotime($c->last_activity), current_time('timestamp'));
                         $has_phone = !empty($c->mobile);
                         $item_names = [];
                         foreach ($events as $ev) {
@@ -372,7 +359,7 @@ class Sellwin_Admin
                         $item_title = strip_tags($item_list);
                     ?>
                         <tr>
-                            <td><strong><?php echo esc_html($c->customer_name ?: 'Guest'); ?></strong></td>
+                            <td><strong><?php echo esc_html($c->name ?: 'Guest'); ?></strong></td>
                             <td>
                                 <?php if ($has_phone) : ?>
                                     <a href="https://wa.me/<?php echo esc_attr($country_code . $c->mobile); ?>?text=<?php echo rawurlencode('Hi, you recently added products to your cart on Sellwin. Can we help you complete your order?'); ?>" target="_blank" style="text-decoration:none;color:#25D366;font-weight:600;" title="Chat on WhatsApp">
@@ -383,7 +370,7 @@ class Sellwin_Admin
                                 <?php endif; ?>
                             </td>
                             <td><?php echo (int) $c->product_count; ?></td>
-                            <td><strong>₹<?php echo number_format($cart_value, 0, '.', ','); ?></strong></td>
+                            <td><strong>₹<?php echo number_format((float) $c->cart_value, 0, '.', ','); ?></strong></td>
                             <td><?php echo $ago; ?> ago</td>
                             <td title="<?php echo esc_attr($item_title); ?>" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><?= $item_list ?: '—' ?></td>
                             <td>

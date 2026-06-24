@@ -142,6 +142,9 @@ add_action('woocommerce_before_checkout_form', 'sellwin_track_checkout', 10, 0);
 add_action('woocommerce_thankyou', 'sellwin_track_order', 10, 1);
 add_action('wp_login', 'sellwin_sync_session_login', 10, 2);
 
+// Sync cart on EVERY page load so existing carts are captured
+add_action('wp_footer', 'sellwin_sync_cart', 5, 0);
+
 /**
  * Helper: get current session
  */
@@ -168,10 +171,8 @@ function sellwin_get_db(): Sellwin_Database
 
 function sellwin_track_add_to_cart($cart_item_key, $product_id, $quantity, $variation_id, $variation, $cart_item_data): void
 {
-    $mobile      = sellwin_get_session()->get_mobile();
     $session_key = sellwin_get_session()->get_session_id();
-
-    if (empty($mobile)) return;
+    $mobile      = sellwin_get_session()->get_mobile();
 
     $product = wc_get_product($product_id);
     $name    = $product ? $product->get_name() : 'Unknown';
@@ -190,20 +191,20 @@ function sellwin_track_add_to_cart($cart_item_key, $product_id, $quantity, $vari
 
 function sellwin_track_cart_change($cart_item_key, $cart): void
 {
-    $mobile = sellwin_get_session()->get_mobile();
-    if (empty($mobile)) return;
     sellwin_sync_cart();
 }
 
 function sellwin_sync_cart(): void
 {
+    if (is_admin() && !defined('DOING_AJAX')) return;
+
     $session_key = sellwin_get_session()->get_session_id();
     $mobile      = sellwin_get_session()->get_mobile();
     $name        = sellwin_get_session()->get_name();
 
-    if (empty($mobile)) return;
-
     $cart_data = sellwin_get_session()->get_wc_cart_data();
+
+    if (empty($cart_data['products'])) return;
 
     sellwin_get_db()->upsert_cart($session_key, [
         'mobile'       => $mobile,
@@ -219,8 +220,6 @@ function sellwin_sync_cart(): void
 function sellwin_track_checkout(): void
 {
     $mobile = sellwin_get_session()->get_mobile();
-    if (empty($mobile)) return;
-
     $cart_data = sellwin_get_session()->get_wc_cart_data();
 
     sellwin_get_db()->insert_event([
