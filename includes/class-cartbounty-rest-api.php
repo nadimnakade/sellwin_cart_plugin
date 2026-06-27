@@ -230,11 +230,45 @@ class CartBounty_REST_API {
         $search   = sanitize_text_field( $request->get_param( 'search' ) ?: '' );
         $filter   = sanitize_text_field( $request->get_param( 'status' ) ?: $request->get_param( 'filter' ) ?: '' );
         $idle_minutes = max( 1, absint( $request->get_param( 'idle_minutes' ) ) ?: 1 );
+        $time_range = sanitize_text_field( $request->get_param( 'time_range' ) ?: '' );
         $offset   = ( $page - 1 ) * $per_page;
 
-        $idle_threshold = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( $idle_minutes * MINUTE_IN_SECONDS ) );
+        $now_timestamp = current_time( 'timestamp' );
+        $idle_threshold = date( 'Y-m-d H:i:s', $now_timestamp - ( $idle_minutes * MINUTE_IN_SECONDS ) );
         $where = "WHERE cart_contents != '' AND time <= %s";
         $where_args = array( $idle_threshold );
+
+        // Apply time_range filter (lower bound — oldest cart to include)
+        $time_from = '';
+        switch ( $time_range ) {
+            case '5m':
+                $time_from = date( 'Y-m-d H:i:s', $now_timestamp - ( 5 * MINUTE_IN_SECONDS ) );
+                break;
+            case '1h':
+                $time_from = date( 'Y-m-d H:i:s', $now_timestamp - HOUR_IN_SECONDS );
+                break;
+            case 'today':
+                $time_from = date( 'Y-m-d 00:00:00', $now_timestamp );
+                break;
+            case 'week':
+                $time_from = date( 'Y-m-d H:i:s', $now_timestamp - ( 7 * DAY_IN_SECONDS ) );
+                break;
+            case 'month':
+                $time_from = date( 'Y-m-d H:i:s', $now_timestamp - ( 30 * DAY_IN_SECONDS ) );
+                break;
+            case 'year':
+                $time_from = date( 'Y-m-d H:i:s', $now_timestamp - ( 365 * DAY_IN_SECONDS ) );
+                break;
+            case 'all':
+            default:
+                $time_from = '';
+                break;
+        }
+
+        if ( $time_from ) {
+            $where .= " AND time >= %s";
+            $where_args[] = $time_from;
+        }
 
         if ( $search ) {
             $where .= " AND (name LIKE %s OR surname LIKE %s OR email LIKE %s OR phone LIKE %s)";

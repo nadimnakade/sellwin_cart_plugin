@@ -3962,9 +3962,9 @@ class CartBounty_Admin{
 
 			}else{
 
-				if( $this->anonymous_carts_excluded() ){ //In case anonymous shopping carts are excluded - do not include them
-					$additional_anonymous_cart_validation = " AND (email != '' OR phone != '')";
-				}
+				// if( $this->anonymous_carts_excluded() ){ //In case anonymous shopping carts are excluded - do not include them
+				// 	$additional_anonymous_cart_validation = " AND (email != '' OR phone != '')";
+				// }
 
 				$where_sentence = "AND type != " . $this->get_cart_type( 'ordered' ) ." AND type != " . $this->get_cart_type( 'ordered_deducted' ) . $additional_anonymous_cart_validation;
 			}

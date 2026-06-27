@@ -277,7 +277,7 @@ class CartBounty_Public{
 		}
 
 		if( $anonymous ){ //In case of anonymous cart
-			$this->update_cart_data( $cart, $user_ip );
+			$updated_rows = $this->update_cart_data( $cart, $user_ip );
 
 		}else{
 			$save_user_data = false;
@@ -290,11 +290,15 @@ class CartBounty_Public{
 			}
 
 			if( is_user_logged_in() || $save_user_data ){
-				$this->update_cart_and_user_data( $cart, $user_data, $user_ip );
+				$updated_rows = $this->update_cart_and_user_data( $cart, $user_data, $user_ip );
 
 			}else{
-				$this->update_cart_data( $cart, $user_ip );
+				$updated_rows = $this->update_cart_data( $cart, $user_ip );
 			}
+		}
+
+		if( empty( $updated_rows ) ){
+			$this->create_new_cart( $cart, $user_data, $anonymous, $user_ip );
 		}
 
 		$this->set_cartbounty_session( $cart['session_id'] );
@@ -338,6 +342,7 @@ class CartBounty_Public{
 		);
 
 		$this->delete_duplicate_carts( $cart['session_id'], $updated_rows );
+		return $updated_rows;
 	}
 
 	/**
@@ -407,6 +412,7 @@ class CartBounty_Public{
 		$this->delete_duplicate_carts( $cart['session_id'], $updated_rows );
 		$this->increase_recoverable_cart_count();
 		$this->update_woocommerce_database_session( (object)$user_data );
+		return $updated_rows;
 	}
 
 	/**
@@ -716,7 +722,7 @@ class CartBounty_Public{
 			if(!WC()->session){ //If session does not exist, exit function
 				return;
 			}
-			$customer_id = WC()->session->get_customer_id();
+			$customer_id = get_current_user_id() ? (string) get_current_user_id() : WC()->session->get_customer_id();
 
 			if( WC()->session->get('cartbounty_session_id') !== NULL && WC()->session->get('cartbounty_session_id') !== $customer_id){ //If session is set and it is different from the one that currently is assigned to the customer
 				global $wpdb;
@@ -809,7 +815,7 @@ class CartBounty_Public{
 		$session_id = WC()->session->get( 'cartbounty_session_id' ); //Check if the session is already set
 		
 		if( empty( $session_id ) ){ //If session value does not exist - set one now
-			$session_id = WC()->session->get_customer_id(); //Retrieving customer ID from WooCommerce sessions variable
+			$session_id = get_current_user_id() ? (string) get_current_user_id() : WC()->session->get_customer_id(); //Use logged-in WP user ID when available
 		}
 
 		if( WC()->session->get( 'cartbounty_from_link' ) && WC()->session->get( 'cartbounty_session_id' ) ){
