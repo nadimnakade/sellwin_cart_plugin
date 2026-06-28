@@ -240,7 +240,7 @@ class CartBounty_REST_API {
 
         $now_timestamp = current_time( 'timestamp' );
         $idle_threshold = date( 'Y-m-d H:i:s', $now_timestamp - ( $idle_minutes * MINUTE_IN_SECONDS ) );
-        $where = "WHERE email != '' AND time <= %s";
+        $where = "WHERE (email != '' OR phone != '') AND time <= %s AND (type IS NULL OR type != 'recovered')";
         $where_args = array( $idle_threshold );
 
         // Apply time_range filter (lower bound — oldest cart to include)
@@ -325,8 +325,9 @@ class CartBounty_REST_API {
             'total'      => $total,
             'page'       => $page,
             'per_page'   => $per_page,
-            'total_pages' => (int) ceil( $total / $per_page ),
-            'data'       => $results,
+            'total_pages' => $total_pages,
+            'totalPages'  => $total_pages,
+            'data'        => $results,
         ), 200 );
     }
 
@@ -334,7 +335,7 @@ class CartBounty_REST_API {
         $table = $this->get_table();
         global $wpdb;
 
-        $minutes = absint( $request->get_param( 'minutes' ) ) ?: 5;
+        $minutes = absint( $request->get_param( 'minutes' ) ) ?: 1;
         $since  = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( $minutes * MINUTE_IN_SECONDS ) );
 
         $results = $wpdb->get_results(
@@ -436,9 +437,9 @@ class CartBounty_REST_API {
         $products = $this->build_products( $row['cart_contents'] );
         $name = trim( ( isset( $row['name'] ) ? $row['name'] : '' ) . ' ' . ( isset( $row['surname'] ) ? $row['surname'] : '' ) );
 
-        $html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Abandoned Cart #' . $id . '</title>';
+        $html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Cart #' . $id . '</title>';
         $html .= '<style>body{font-family:Arial,sans-serif;margin:40px;color:#333}h1{color:#2563eb;border-bottom:2px solid #eee;padding-bottom:10px}.info{margin:20px 0}.info td{padding:4px 12px 4px 0}.products{margin:20px 0;width:100%;border-collapse:collapse}.products th{background:#f3f4f6;padding:8px 12px;text-align:left;font-size:13px;text-transform:uppercase}.products td{padding:8px 12px;border-bottom:1px solid #eee}.total{font-size:18px;font-weight:bold;color:#2563eb}.footer{margin-top:30px;font-size:12px;color:#999;border-top:1px solid #eee;padding-top:10px}</style></head><body>';
-        $html .= '<h1>Abandoned Cart #' . $id . '</h1>';
+        $html .= '<h1>Cart #' . $id . '</h1>';
 
         $html .= '<table class="info">';
         if ( $name )      $html .= '<tr><td><strong>Name:</strong></td><td>' . esc_html( $name ) . '</td></tr>';
@@ -462,7 +463,7 @@ class CartBounty_REST_API {
         $html .= '</body></html>';
 
         header( 'Content-Type: text/html' );
-        header( 'Content-Disposition: attachment; filename="abandoned-cart-' . $id . '.html"' );
+        header( 'Content-Disposition: attachment; filename="cart-' . $id . '.html"' );
         header( 'Content-Length: ' . strlen( $html ) );
         echo $html;
         exit;
@@ -473,21 +474,24 @@ class CartBounty_REST_API {
         global $wpdb;
 
         $idle_threshold = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - MINUTE_IN_SECONDS );
-        $total      = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(id) FROM $table WHERE cart_contents != '' AND time <= %s", $idle_threshold ) );
+        $total      = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(id) FROM $table WHERE (email != '' OR phone != '') AND time <= %s", $idle_threshold ) );
         $contacted  = (int) $wpdb->get_var( "SELECT COUNT(id) FROM $table WHERE contacted_status = 'contacted'" );
-        $pending    = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(id) FROM $table WHERE cart_contents != '' AND time <= %s AND (contacted_status IS NULL OR contacted_status != 'contacted')", $idle_threshold ) );
+        $pending    = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(id) FROM $table WHERE (email != '' OR phone != '') AND time <= %s AND (contacted_status IS NULL OR contacted_status != 'contacted') AND (type IS NULL OR type != 'recovered')", $idle_threshold ) );
         $recovered  = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(id) FROM $table WHERE type = %s", 'recovered' ) );
-        $total_value = (float) $wpdb->get_var( $wpdb->prepare( "SELECT SUM(cart_total) FROM $table WHERE cart_contents != '' AND time <= %s", $idle_threshold ) );
+        $total_value = (float) $wpdb->get_var( $wpdb->prepare( "SELECT SUM(cart_total) FROM $table WHERE (email != '' OR phone != '') AND time <= %s AND (type IS NULL OR type != 'recovered')", $idle_threshold ) );
 
         return new WP_REST_Response( array(
-            'total'       => $total,
-            'active'      => $total - $recovered,
-            'recovered'   => $recovered,
-            'contacted'   => $contacted,
-            'pending'     => $pending,
-            'total_value' => (float) $total_value,
-            'total_carts' => $total,
+            'total'        => $total,
+            'active'       => $total - $recovered,
+            'recovered'    => $recovered,
+            'contacted'    => $contacted,
+            'pending'      => $pending,
+            'total_value'  => (float) $total_value,
+            'total_carts'  => $total,
             'total_revenue' => (float) $total_value,
+            'totalCarts'   => $total,
+            'totalValue'   => (float) $total_value,
+            'totalRevenue' => (float) $total_value,
         ), 200 );
     }
 
@@ -567,7 +571,7 @@ class CartBounty_REST_API {
         $results = $wpdb->get_results( "SELECT id, name, surname, email, phone, cart_total, currency, time, contacted_status, contacted_time, contacted_via FROM $table WHERE cart_contents != '' ORDER BY time DESC", ARRAY_A );
 
         header( 'Content-Type: text/csv; charset=utf-8' );
-        header( 'Content-Disposition: attachment; filename=abandoned-carts-export.csv' );
+        header( 'Content-Disposition: attachment; filename=latest-carts-export.csv' );
         $output = fopen( 'php://output', 'w' );
         fputcsv( $output, array( 'ID', 'Name', 'Surname', 'Email', 'Phone', 'Cart Total', 'Currency', 'Time', 'Contacted Status', 'Contacted Time', 'Contacted Via' ) );
         if ( is_array( $results ) ) {
