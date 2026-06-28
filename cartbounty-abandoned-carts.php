@@ -48,7 +48,7 @@ if (!defined('CARTBOUNTY_MAKE_LINK')) define('CARTBOUNTY_MAKE_LINK', 'https://ww
 if (!defined('CARTBOUNTY_PABBLY_LINK')) define('CARTBOUNTY_PABBLY_LINK', 'https://payments.pabbly.com/api/affurl/RVYZ07kQyUZ0Z1HUKZ1m/xciq3ahCAzNG3CSo?target=9Z2AHyhSldo6KI1Fn' );
 
 add_action( 'init', 'sellwin_cartbounty_cors_headers', 0 );
-add_filter( 'rest_pre_serve_request', 'sellwin_cartbounty_rest_pre_serve_cors_headers', 99 );
+//add_filter( 'rest_pre_serve_request', 'sellwin_cartbounty_rest_pre_serve_cors_headers', 99 );
 function sellwin_cartbounty_cors_headers() {
 	$request_uri = isset( $_SERVER['REQUEST_URI'] ) ? $_SERVER['REQUEST_URI'] : '';
 	if ( strpos( $request_uri, '/wp-json/sellwin/v1/' ) === false && strpos( $request_uri, '?rest_route=/sellwin/v1/' ) === false ) {
