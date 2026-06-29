@@ -74,6 +74,11 @@ class CartBounty_REST_API {
             'callback'            => array( $this, 'download_cart' ),
             'permission_callback' => array( $this, 'check_permission' ),
         ));
+        register_rest_route( $this->namespace, '/order/(?P<id>\d+)', array(
+            'methods'             => 'GET',
+            'callback'            => array( $this, 'get_order' ),
+            'permission_callback' => array( $this, 'check_permission' ),
+        ));
     }
 
     public function check_permission( $request = null ) {
@@ -598,5 +603,102 @@ class CartBounty_REST_API {
             'php_version'       => PHP_VERSION,
             'woocommerce_active'=> class_exists( 'WooCommerce' ),
         ), 200 );
+    }
+
+    public function get_order( $request ) {
+        $order_id = (int) $request->get_param( 'id' );
+        $order = wc_get_order( $order_id );
+
+        if ( ! $order ) {
+            return new WP_Error( 'not_found', 'Order not found', array( 'status' => 404 ) );
+        }
+
+        $image_cache = array();
+        $items = array();
+        foreach ( $order->get_items() as $item ) {
+            $product = $item->get_product();
+            $image_url = '';
+            $image_base64 = null;
+
+            if ( $product ) {
+                $image_id = $product->get_image_id();
+                $image_url = wp_get_attachment_url( $image_id );
+
+                if ( $image_id && ! isset( $image_cache[ $image_id ] ) ) {
+                    $path = get_attached_file( $image_id );
+                    if ( $path && file_exists( $path ) ) {
+                        $mime = mime_content_type( $path );
+                        if ( $mime ) {
+                            $image_cache[ $image_id ] = 'data:' . $mime . ';base64,' . base64_encode( file_get_contents( $path ) );
+                        } else {
+                            $image_cache[ $image_id ] = null;
+                        }
+                    } else {
+                        $image_cache[ $image_id ] = null;
+                    }
+                }
+
+                $image_base64 = $image_cache[ $image_id ] ?? null;
+            }
+
+            $items[] = array(
+                'productId'   => $item->get_product_id(),
+                'name'        => $item->get_name(),
+                'sku'         => $product ? $product->get_sku() : '',
+                'quantity'    => $item->get_quantity(),
+                'price'       => (float) $item->get_total(),
+                'subtotal'    => (float) $item->get_subtotal(),
+                'image'       => $image_url,
+                'imageBase64' => $image_base64,
+            );
+        }
+
+        $mobile = $order->get_meta( 'sellwin_mobile' ) ?: $order->get_billing_phone();
+
+        $data = array(
+            'id'             => $order->get_id(),
+            'orderNumber'    => $order->get_order_number(),
+            'status'         => $order->get_status(),
+            'currency'       => $order->get_currency(),
+            'dateCreated'    => $order->get_date_created() ? $order->get_date_created()->format( 'Y-m-d H:i:s' ) : '',
+            'datePaid'       => $order->get_date_paid() ? $order->get_date_paid()->format( 'Y-m-d H:i:s' ) : '',
+            'paymentMethod'  => $order->get_payment_method_title(),
+            'customer'       => array(
+                'name'   => $order->get_billing_first_name() . ' ' . $order->get_billing_last_name(),
+                'mobile' => $mobile,
+                'email'  => $order->get_billing_email(),
+            ),
+            'billing'        => array(
+                'firstName' => $order->get_billing_first_name(),
+                'lastName'  => $order->get_billing_last_name(),
+                'mobile'    => $mobile,
+                'email'     => $order->get_billing_email(),
+                'address1'  => $order->get_billing_address_1(),
+                'address2'  => $order->get_billing_address_2(),
+                'city'      => $order->get_billing_city(),
+                'state'     => $order->get_billing_state(),
+                'postcode'  => $order->get_billing_postcode(),
+                'country'   => $order->get_billing_country(),
+            ),
+            'shipping'       => array(
+                'firstName' => $order->get_shipping_first_name(),
+                'lastName'  => $order->get_shipping_last_name(),
+                'address1'  => $order->get_shipping_address_1(),
+                'address2'  => $order->get_shipping_address_2(),
+                'city'      => $order->get_shipping_city(),
+                'state'     => $order->get_shipping_state(),
+                'postcode'  => $order->get_shipping_postcode(),
+                'country'   => $order->get_shipping_country(),
+            ),
+            'products'       => $items,
+            'subtotal'       => (float) $order->get_subtotal(),
+            'discountTotal'  => (float) $order->get_discount_total(),
+            'taxTotal'       => (float) $order->get_total_tax(),
+            'shippingTotal'  => (float) $order->get_shipping_total(),
+            'total'          => (float) $order->get_total(),
+            'note'           => $order->get_customer_note(),
+        );
+
+        return new WP_REST_Response( $data, 200 );
     }
 }
