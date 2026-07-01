@@ -69,20 +69,31 @@ function sellwin_cartbounty_rest_pre_serve_cors_headers( $served ) {
 }
 
 function sellwin_cartbounty_send_cors_headers() {
-	$allowed_origins = array(
-		'http://localhost:4200',
-		'https://dulcet-entremet-dc75a1.netlify.app',
-	);
-	$origin = isset( $_SERVER['HTTP_ORIGIN'] ) ? $_SERVER['HTTP_ORIGIN'] : '';
+	// $allowed_origins = array(
+	// 	'http://localhost:4200',
+	// 	'https://dulcet-entremet-dc75a1.netlify.app',
+	// );
+	// $origin = isset( $_SERVER['HTTP_ORIGIN'] ) ? $_SERVER['HTTP_ORIGIN'] : '';
 
-	if ( in_array( $origin, $allowed_origins, true ) && ! headers_sent() ) {
-		header_remove( 'Access-Control-Allow-Origin' );
-		header( 'Access-Control-Allow-Origin: ' . $origin, true );
-		header( 'Access-Control-Allow-Methods: PUT,GET, POST, DELETE, OPTIONS', true );
-		header( 'Access-Control-Allow-Headers: Content-Type, Authorization, X-WP-Nonce', true );
-		header( 'Access-Control-Allow-Credentials: true', true );
-		header( 'Vary: Origin', false );
-	}
+	// if ( in_array( $origin, $allowed_origins, true ) && ! headers_sent() ) {
+	// 	header_remove( 'Access-Control-Allow-Origin' );
+	// 	header( 'Access-Control-Allow-Origin: ' . $origin, true );
+	// 	header( 'Access-Control-Allow-Methods: PUT,GET, POST, DELETE, OPTIONS', true );
+	// 	header( 'Access-Control-Allow-Headers: Content-Type, Authorization, X-WP-Nonce', true );
+	// 	header( 'Access-Control-Allow-Credentials: true', true );
+	// 	header( 'Vary: Origin', false );
+	// }
+	 if (!headers_sent() ) {
+        header('Access-Control-Allow-Origin: *');
+        header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
+        header('Access-Control-Allow-Headers: Content-Type, Authorization, X-WP-Nonce');
+    }
+
+    // Handle preflight requests
+    if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+        status_header(200);
+        exit;
+    }
 }
 
 //Registering custom options

@@ -79,6 +79,16 @@ class CartBounty_REST_API {
             'callback'            => array( $this, 'get_order' ),
             'permission_callback' => array( $this, 'check_permission' ),
         ));
+        register_rest_route( $this->namespace, '/cart/(?P<id>\d+)', array(
+            'methods'             => 'GET',
+            'callback'            => array( $this, 'get_cart_detail' ),
+            'permission_callback' => array( $this, 'check_permission' ),
+        ));
+        register_rest_route( $this->namespace, '/cart/(?P<id>\d+)/convert', array(
+            'methods'             => 'POST',
+            'callback'            => array( $this, 'convert_cart_to_order' ),
+            'permission_callback' => array( $this, 'check_permission' ),
+        ));
     }
 
     public function check_permission( $request = null ) {
@@ -605,6 +615,115 @@ class CartBounty_REST_API {
         ), 200 );
     }
 
+    public function get_cart_detail( $request ) {
+        $table = $this->get_table();
+        global $wpdb;
+        $id = absint( $request->get_param( 'id' ) );
+
+        $row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $table WHERE id = %d", $id ), ARRAY_A );
+        if ( ! $row ) {
+            return new WP_Error( 'not_found', 'Cart not found', array( 'status' => 404 ) );
+        }
+
+        $row = $this->enrich_customer_fields( $row );
+        $cart_contents = maybe_unserialize( $row['cart_contents'] );
+        $image_cache = array();
+        $products = array();
+
+        if ( is_array( $cart_contents ) ) {
+            foreach ( $cart_contents as $item ) {
+                if ( ! isset( $item['product_id'] ) ) {
+                    continue;
+                }
+
+                $product = wc_get_product( $item['product_id'] );
+                $thumbnail = '';
+                $image_base64 = null;
+
+                if ( $product ) {
+                    $image_id = $product->get_image_id();
+                    $thumbnail = wp_get_attachment_url( $image_id );
+
+                    if ( $image_id && ! isset( $image_cache[ $image_id ] ) ) {
+                        $path = get_attached_file( $image_id );
+                        if ( $path && file_exists( $path ) ) {
+                            $mime = mime_content_type( $path );
+                            if ( $mime ) {
+                                $image_cache[ $image_id ] = 'data:' . $mime . ';base64,' . base64_encode( file_get_contents( $path ) );
+                            } else {
+                                $image_cache[ $image_id ] = null;
+                            }
+                        } else {
+                            $image_cache[ $image_id ] = null;
+                        }
+                    }
+
+                    $image_base64 = $image_cache[ $image_id ] ?? null;
+                }
+
+                $products[] = array(
+                    'productId'   => (int) $item['product_id'],
+                    'name'        => isset( $item['product_title'] ) ? $item['product_title'] : '',
+                    'sku'         => $product ? $product->get_sku() : '',
+                    'quantity'    => isset( $item['quantity'] ) ? (int) $item['quantity'] : 1,
+                    'price'       => isset( $item['product_price'] ) ? (float) $item['product_price'] : 0,
+                    'subtotal'    => ( isset( $item['quantity'] ) ? (int) $item['quantity'] : 1 ) * ( isset( $item['product_price'] ) ? (float) $item['product_price'] : 0 ),
+                    'image'       => $thumbnail,
+                    'imageBase64' => $image_base64,
+                );
+            }
+        }
+
+        $name = trim( ( isset( $row['name'] ) ? $row['name'] : '' ) . ' ' . ( isset( $row['surname'] ) ? $row['surname'] : '' ) );
+
+        $data = array(
+            'id'             => (int) $row['id'],
+            'orderNumber'    => 'C' . $row['id'],
+            'status'         => isset( $row['contacted_status'] ) ? $row['contacted_status'] : '',
+            'currency'       => isset( $row['currency'] ) ? $row['currency'] : 'INR',
+            'dateCreated'    => $row['time'],
+            'datePaid'       => '',
+            'paymentMethod'  => '',
+            'customer'       => array(
+                'name'   => $name,
+                'mobile' => $row['phone'] ?? '',
+                'email'  => $row['email'] ?? '',
+            ),
+            'billing'        => array(
+                'firstName' => isset( $row['name'] ) ? $row['name'] : '',
+                'lastName'  => isset( $row['surname'] ) ? $row['surname'] : '',
+                'mobile'    => $row['phone'] ?? '',
+                'email'     => $row['email'] ?? '',
+                'address1'  => '',
+                'address2'  => '',
+                'city'      => '',
+                'state'     => '',
+                'postcode'  => '',
+                'country'   => '',
+            ),
+            'shipping'       => array(
+                'firstName' => '',
+                'lastName'  => '',
+                'mobile'    => '',
+                'address1'  => '',
+                'address2'  => '',
+                'city'      => '',
+                'state'     => '',
+                'postcode'  => '',
+                'country'   => '',
+            ),
+            'products'       => $products,
+            'subtotal'       => (float) $row['cart_total'],
+            'discountTotal'  => 0,
+            'taxTotal'       => 0,
+            'shippingTotal'  => 0,
+            'total'          => (float) $row['cart_total'],
+            'note'           => '',
+        );
+
+        return new WP_REST_Response( $data, 200 );
+    }
+
     public function get_order( $request ) {
         $order_id = (int) $request->get_param( 'id' );
         $order = wc_get_order( $order_id );
@@ -700,5 +819,78 @@ class CartBounty_REST_API {
         );
 
         return new WP_REST_Response( $data, 200 );
+    }
+
+    public function convert_cart_to_order( $request ) {
+        $table = $this->get_table();
+        global $wpdb;
+
+        $cart_id = absint( $request->get_param( 'id' ) );
+        $row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $table WHERE id = %d", $cart_id ), ARRAY_A );
+
+        if ( ! $row ) {
+            return new WP_Error( 'not_found', 'Cart not found', array( 'status' => 404 ) );
+        }
+
+        if ( ! class_exists( 'WooCommerce' ) ) {
+            return new WP_Error( 'no_woocommerce', 'WooCommerce is not active', array( 'status' => 500 ) );
+        }
+
+        $cart_contents = maybe_unserialize( $row['cart_contents'] );
+        if ( ! is_array( $cart_contents ) || empty( $cart_contents ) ) {
+            return new WP_Error( 'empty_cart', 'Cart has no products', array( 'status' => 400 ) );
+        }
+
+        $name  = isset( $row['name'] ) ? $row['name'] : '';
+        $email = isset( $row['email'] ) ? $row['email'] : '';
+        $phone = isset( $row['phone'] ) ? $row['phone'] : '';
+
+        $order = wc_create_order();
+
+        $order->set_currency( isset( $row['currency'] ) ? $row['currency'] : get_woocommerce_currency() );
+
+        $address = array(
+            'first_name' => $name,
+            'last_name'  => '',
+            'email'      => $email,
+            'phone'      => $phone,
+        );
+
+        $order->set_address( $address, 'billing' );
+
+        foreach ( $cart_contents as $item ) {
+            $product_id = isset( $item['product_id'] ) ? (int) $item['product_id'] : 0;
+            $quantity   = isset( $item['quantity'] ) ? (int) $item['quantity'] : 1;
+
+            if ( ! $product_id ) {
+                continue;
+            }
+
+            $product = wc_get_product( $product_id );
+            if ( ! $product ) {
+                continue;
+            }
+
+            $order->add_product( $product, $quantity );
+        }
+
+        $order->set_status( 'processing' );
+
+        $order->set_customer_note( 'Converted from abandoned cart #' . $cart_id );
+
+        $order->calculate_totals();
+        $order_id = $order->save();
+
+        $wpdb->update(
+            $table,
+            array( 'type' => 'recovered' ),
+            array( 'id' => $cart_id )
+        );
+
+        return new WP_REST_Response( array(
+            'success'     => true,
+            'order_id'    => $order_id,
+            'orderNumber' => $order->get_order_number(),
+        ), 200 );
     }
 }
