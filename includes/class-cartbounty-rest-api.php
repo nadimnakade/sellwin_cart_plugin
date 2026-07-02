@@ -182,12 +182,15 @@ class CartBounty_REST_API {
         if ( is_array( $cart_contents ) ) {
             foreach ( $cart_contents as $item ) {
                 if ( isset( $item['product_id'] ) ) {
-                    $thumbnail = get_the_post_thumbnail_url( $item['product_id'], 'thumbnail' );
+                    $product_id = (int) $item['product_id'];
+                    $product = wc_get_product( $product_id );
+                    $price = $product ? $product->get_price() : 0;
+                    $thumbnail = get_the_post_thumbnail_url( $product_id, 'thumbnail' );
                     $products[] = array(
-                        'product_id' => (int) $item['product_id'],
-                        'title'      => isset( $item['product_title'] ) ? $item['product_title'] : '',
+                        'product_id' => $product_id,
+                        'title'      => isset( $item['product_title'] ) ? $item['product_title'] : ( $product ? $product->get_name() : '' ),
                         'quantity'   => isset( $item['quantity'] ) ? (int) $item['quantity'] : 1,
-                        'price'      => isset( $item['product_price'] ) ? (float) $item['product_price'] : 0,
+                        'price'      => (float) $price, // Product price from product object
                         'thumbnail'  => $thumbnail ? $thumbnail : '',
                     );
                 }
@@ -249,24 +252,25 @@ class CartBounty_REST_API {
         $page     = max( 1, absint( $request->get_param( 'page' ) ) ?: 1 );
         $search   = sanitize_text_field( $request->get_param( 'search' ) ?: '' );
         $filter   = sanitize_text_field( $request->get_param( 'status' ) ?: $request->get_param( 'filter' ) ?: '' );
-        $idle_minutes = max( 1, absint( $request->get_param( 'idle_minutes' ) ) ?: 1 );
+        $idle_minutes = max( 0, absint( $request->get_param( 'idle_minutes' ) ) );
         $time_range = sanitize_text_field( $request->get_param( 'time_range' ) ?: '' );
         $offset   = ( $page - 1 ) * $per_page;
 
         $now_timestamp = current_time( 'timestamp' );
         $idle_threshold = date( 'Y-m-d H:i:s', $now_timestamp - ( $idle_minutes * MINUTE_IN_SECONDS ) );
-        $where = "WHERE (email != '' OR phone != '') AND time <= %s AND (type IS NULL OR type != 'recovered')";
+        //$where = "WHERE (email != '' OR phone != '') AND time <= %s AND (type IS NULL OR type != 'recovered')";
+        $where = "WHERE time <= %s AND cart_contents != ''";
         $where_args = array( $idle_threshold );
 
         // Apply time_range filter (lower bound — oldest cart to include)
         $time_from = '';
         switch ( $time_range ) {
-            case '5m':
-                $time_from = date( 'Y-m-d H:i:s', $now_timestamp - ( 5 * MINUTE_IN_SECONDS ) );
-                break;
-            case '1h':
-                $time_from = date( 'Y-m-d H:i:s', $now_timestamp - HOUR_IN_SECONDS );
-                break;
+            // case '5m':
+            //     $time_from = date( 'Y-m-d H:i:s', $now_timestamp - ( 5 * MINUTE_IN_SECONDS ) );
+            //     break;
+            // case '1h':
+            //     $time_from = date( 'Y-m-d H:i:s', $now_timestamp - HOUR_IN_SECONDS );
+            //     break;
             case 'today':
                 $time_from = date( 'Y-m-d 00:00:00', $now_timestamp );
                 break;
@@ -314,6 +318,7 @@ class CartBounty_REST_API {
             $count_sql = $wpdb->prepare( $count_sql, $where_args );
         }
         $total = (int) $wpdb->get_var( $count_sql );
+        $total_pages = $per_page > 0 ? (int) ceil( $total / $per_page ) : 1;
 
         $orderby_param = sanitize_text_field( $request->get_param( 'orderby' ) ?: 'time' );
         $orderby = in_array( $orderby_param, array( 'time', 'cart_total', 'id', 'name' ), true ) ? $orderby_param : 'time';
@@ -331,6 +336,7 @@ class CartBounty_REST_API {
 
         foreach ( $results as &$row ) {
             $row = $this->enrich_customer_fields( $row );
+            // Build products array with product details including price, title, quantity, thumbnail, etc.
             $row['products'] = $this->build_products( $row['cart_contents'] );
             unset( $row['cart_contents'] );
         }
@@ -357,7 +363,7 @@ class CartBounty_REST_API {
             $wpdb->prepare(
                 "SELECT id, name, surname, email, phone, location, cart_contents, cart_total, currency, time, session_id, type, saved_via
                  FROM $table
-                 WHERE cart_contents != '' AND time > %s AND (type IS NULL OR type != 'recovered')
+                 WHERE cart_contents != '' AND time > %s 
                  ORDER BY time DESC
                  LIMIT 100",
                 $since
@@ -371,6 +377,7 @@ class CartBounty_REST_API {
 
         foreach ( $results as &$row ) {
             $row = $this->enrich_customer_fields( $row );
+            // Build products array with product details including price, title, quantity, thumbnail, etc.
             $row['products'] = $this->build_products( $row['cart_contents'] );
             unset( $row['cart_contents'] );
         }
@@ -489,11 +496,11 @@ class CartBounty_REST_API {
         global $wpdb;
 
         $idle_threshold = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - MINUTE_IN_SECONDS );
-        $total      = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(id) FROM $table WHERE (email != '' OR phone != '') AND time <= %s", $idle_threshold ) );
+        $total      = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(id) FROM $table WHERE cart_contents != '' AND time <= %s", $idle_threshold ) );
         $contacted  = (int) $wpdb->get_var( "SELECT COUNT(id) FROM $table WHERE contacted_status = 'contacted'" );
-        $pending    = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(id) FROM $table WHERE (email != '' OR phone != '') AND time <= %s AND (contacted_status IS NULL OR contacted_status != 'contacted') AND (type IS NULL OR type != 'recovered')", $idle_threshold ) );
+        $pending    = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(id) FROM $table WHERE cart_contents != ''  AND time <= %s AND (contacted_status IS NULL OR contacted_status != 'contacted') AND (type IS NULL OR type != 'recovered')", $idle_threshold ) );
         $recovered  = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(id) FROM $table WHERE type = %s", 'recovered' ) );
-        $total_value = (float) $wpdb->get_var( $wpdb->prepare( "SELECT SUM(cart_total) FROM $table WHERE (email != '' OR phone != '') AND time <= %s AND (type IS NULL OR type != 'recovered')", $idle_threshold ) );
+        $total_value = (float) $wpdb->get_var( $wpdb->prepare( "SELECT SUM(cart_total) FROM $table WHERE cart_contents != ''  AND time <= %s AND (type IS NULL OR type != 'recovered')", $idle_threshold ) );
 
         return new WP_REST_Response( array(
             'total'        => $total,
