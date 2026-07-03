@@ -176,22 +176,43 @@ class CartBounty_REST_API {
         return $wpdb->prefix . CARTBOUNTY_TABLE_NAME;
     }
 
-    private function build_products( $cart_contents ) {
+    private function build_products( $cart_contents, $include_images = false ) {
         $products = array();
         $cart_contents = maybe_unserialize( $cart_contents );
         if ( is_array( $cart_contents ) ) {
             foreach ( $cart_contents as $item ) {
                 if ( isset( $item['product_id'] ) ) {
-                    $product_id = (int) $item['product_id'];
-                    $product = wc_get_product( $product_id );
-                    $price = $product ? $product->get_price() : 0;
-                    $thumbnail = get_the_post_thumbnail_url( $product_id, 'thumbnail' );
+                    $product = wc_get_product( $item['product_id'] );
+                    $thumbnail = get_the_post_thumbnail_url( $item['product_id'], 'thumbnail' );
+                    $image_base64 = null;
+
+                    if ( $include_images && $product ) {
+                        $image_id = $product->get_image_id();
+                        if ( $image_id ) {
+                            $path = get_attached_file( $image_id );
+                            if ( $path && file_exists( $path ) ) {
+                                $mime = mime_content_type( $path );
+                                if ( $mime ) {
+                                    $image_base64 = 'data:' . $mime . ';base64,' . base64_encode( file_get_contents( $path ) );
+                                }
+                            }
+                        }
+                    }
+
+                    $price = isset( $item['product_price'] ) ? (float) $item['product_price'] : 0;
+                    if ( $price <= 0 && $product && method_exists( $product, 'get_price' ) ) {
+                        $price = (float) $product->get_price();
+                    }
+
                     $products[] = array(
-                        'product_id' => $product_id,
-                        'title'      => isset( $item['product_title'] ) ? $item['product_title'] : ( $product ? $product->get_name() : '' ),
-                        'quantity'   => isset( $item['quantity'] ) ? (int) $item['quantity'] : 1,
-                        'price'      => (float) $price, // Product price from product object
-                        'thumbnail'  => $thumbnail ? $thumbnail : '',
+                        'product_id'  => (int) $item['product_id'],
+                        'title'       => isset( $item['product_title'] ) ? $item['product_title'] : '',
+                        'quantity'    => isset( $item['quantity'] ) ? (int) $item['quantity'] : 1,
+                        'price'       => $price,
+                        'subtotal'    => ( isset( $item['quantity'] ) ? (int) $item['quantity'] : 1 ) * $price,
+                        'thumbnail'   => $thumbnail ? $thumbnail : '',
+                        'imageBase64' => $image_base64,
+                        'sku'         => $product ? $product->get_sku() : '',
                     );
                 }
             }
@@ -258,9 +279,17 @@ class CartBounty_REST_API {
 
         $now_timestamp = current_time( 'timestamp' );
         $idle_threshold = date( 'Y-m-d H:i:s', $now_timestamp - ( $idle_minutes * MINUTE_IN_SECONDS ) );
-        //$where = "WHERE (email != '' OR phone != '') AND time <= %s AND (type IS NULL OR type != 'recovered')";
+        // type: 0=abandoned, 1=recovered, 2=ordered - exclude recovered (1) by default
         $where = "WHERE time <= %s AND cart_contents != ''";
         $where_args = array( $idle_threshold );
+
+        // Deduplicate: only show the latest cart per session_id (user)
+        // Prevents stale duplicates when CartBounty creates new records on resume
+        $where .= " AND id IN (SELECT max_id FROM (SELECT MAX(id) as max_id FROM $table WHERE time <= %s AND cart_contents != '' GROUP BY session_id) _dedup)";
+        $where_args[] = $idle_threshold;
+
+        // Filter by type (after dedup)
+        $where .= " AND (type IS NULL OR type = 0)";
 
         // Apply time_range filter (lower bound — oldest cart to include)
         $time_from = '';
@@ -300,17 +329,35 @@ class CartBounty_REST_API {
             $where_args = array_merge( $where_args, array( $like, $like, $like, $like ) );
         }
 
-        if ( $filter === 'recovered' ) {
-            $where .= " AND type = 'recovered'";
-        } elseif ( $filter === 'recoverable' ) {
-            $where .= " AND (type IS NULL OR type != 'recovered')";
-        } elseif ( $filter === 'contacted' ) {
-            $where .= " AND contacted_status = 'contacted'";
-        } elseif ( $filter === 'new' ) {
-            $new_minutes = defined( 'CARTBOUNTY_NEW_NOTICE' ) ? CARTBOUNTY_NEW_NOTICE : 240;
-            $new_threshold = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( $new_minutes * MINUTE_IN_SECONDS ) );
-            $where .= " AND time >= %s";
-            $where_args[] = $new_threshold;
+        // Handle status filter - apply even when "All Time" is selected if a specific status is chosen
+        $has_status_filter = ! empty( $filter ) && $filter !== '';
+        if ( $has_status_filter ) {
+            if ( $filter === 'unconfirmed' ) {
+                // New carts: type=0 (abandoned), not yet contacted
+                $where .= " AND type = 0 AND (contacted_status IS NULL OR contacted_status = '' OR contacted_status = 'pending')";
+            } elseif ( $filter === 'confirmed' ) {
+                // Contacted/followed up: contacted_status = 'contacted'
+                $where .= " AND type = 0 AND contacted_status = 'contacted'";
+            } elseif ( $filter === 'rejected' ) {
+                // Closed/lost: contacted_status = 'rejected' or 'closed'
+                $where .= " AND type = 0 AND (contacted_status = 'rejected' OR contacted_status = 'closed')";
+            } elseif ( $filter === 'accepted' ) {
+                // Converted to order: type = 1 (recovered) - override base exclusion
+                $where = preg_replace('/AND \(type IS NULL OR type = 0\)/', '', $where);
+                $where .= " AND type = 1";
+            } elseif ( $filter === 'recovered' ) {
+                $where = preg_replace('/AND \(type IS NULL OR type = 0\)/', '', $where);
+                $where .= " AND type = 1";
+            } elseif ( $filter === 'recoverable' ) {
+                $where .= " AND (type IS NULL OR type = 0)";
+            } elseif ( $filter === 'contacted' ) {
+                $where .= " AND contacted_status = 'contacted'";
+            } elseif ( $filter === 'new' ) {
+                $new_minutes = defined( 'CARTBOUNTY_NEW_NOTICE' ) ? CARTBOUNTY_NEW_NOTICE : 240;
+                $new_threshold = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( $new_minutes * MINUTE_IN_SECONDS ) );
+                $where .= " AND time >= %s";
+                $where_args[] = $new_threshold;
+            }
         }
 
         $count_sql = "SELECT COUNT(id) FROM $table $where";
@@ -326,8 +373,10 @@ class CartBounty_REST_API {
         $order_param = strtoupper( sanitize_text_field( $request->get_param( 'order' ) ?: 'DESC' ) );
         $order = in_array( $order_param, array( 'ASC', 'DESC' ), true ) ? $order_param : 'DESC';
 
-        $data_sql = "SELECT id, name, surname, email, phone, location, cart_contents, cart_total, currency, time, session_id, type, saved_via, contacted_status, contacted_time, contacted_via FROM $table $where ORDER BY $orderby $order LIMIT %d OFFSET %d";
-        $data_args = array_merge( $where_args, array( $per_page, $offset ) );
+        $data_sql = "SELECT id, name, surname, email, phone, location, cart_contents, 
+            cart_total, currency, time, session_id, type, saved_via, contacted_status, 
+            contacted_time, contacted_via FROM $table $where ORDER BY $orderby $order LIMIT %d OFFSET %d";
+            $data_args = array_merge( $where_args, array( $per_page, $offset ) );
         $results = $wpdb->get_results( $wpdb->prepare( $data_sql, $data_args ), ARRAY_A );
 
         if ( ! is_array( $results ) ) {
@@ -336,8 +385,7 @@ class CartBounty_REST_API {
 
         foreach ( $results as &$row ) {
             $row = $this->enrich_customer_fields( $row );
-            // Build products array with product details including price, title, quantity, thumbnail, etc.
-            $row['products'] = $this->build_products( $row['cart_contents'] );
+            $row['products'] = $this->build_products( $row['cart_contents'], true );
             unset( $row['cart_contents'] );
         }
 
@@ -347,8 +395,7 @@ class CartBounty_REST_API {
             'page'       => $page,
             'per_page'   => $per_page,
             'total_pages' => $total_pages,
-            'totalPages'  => $total_pages,
-            'data'        => $results,
+            'totalPages'  => $total_pages            
         ), 200 );
     }
 
@@ -377,7 +424,6 @@ class CartBounty_REST_API {
 
         foreach ( $results as &$row ) {
             $row = $this->enrich_customer_fields( $row );
-            // Build products array with product details including price, title, quantity, thumbnail, etc.
             $row['products'] = $this->build_products( $row['cart_contents'] );
             unset( $row['cart_contents'] );
         }
@@ -498,9 +544,10 @@ class CartBounty_REST_API {
         $idle_threshold = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - MINUTE_IN_SECONDS );
         $total      = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(id) FROM $table WHERE cart_contents != '' AND time <= %s", $idle_threshold ) );
         $contacted  = (int) $wpdb->get_var( "SELECT COUNT(id) FROM $table WHERE contacted_status = 'contacted'" );
-        $pending    = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(id) FROM $table WHERE cart_contents != ''  AND time <= %s AND (contacted_status IS NULL OR contacted_status != 'contacted') AND (type IS NULL OR type != 'recovered')", $idle_threshold ) );
-        $recovered  = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(id) FROM $table WHERE type = %s", 'recovered' ) );
-        $total_value = (float) $wpdb->get_var( $wpdb->prepare( "SELECT SUM(cart_total) FROM $table WHERE cart_contents != ''  AND time <= %s AND (type IS NULL OR type != 'recovered')", $idle_threshold ) );
+        // type: 0=abandoned, 1=recovered, 2=ordered
+        $pending    = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(id) FROM $table WHERE cart_contents != '' AND time <= %s AND (contacted_status IS NULL OR contacted_status != 'contacted') AND (type IS NULL OR type = 0)", $idle_threshold ) );
+        $recovered  = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(id) FROM $table WHERE type = %d", 1 ) );
+        $total_value = (float) $wpdb->get_var( $wpdb->prepare( "SELECT SUM(cart_total) FROM $table WHERE cart_contents != '' AND time <= %s AND (type IS NULL OR type = 0)", $idle_threshold ) );
 
         return new WP_REST_Response( array(
             'total'        => $total,
@@ -888,9 +935,10 @@ class CartBounty_REST_API {
         $order->calculate_totals();
         $order_id = $order->save();
 
+        // Use numeric type (1 = recovered) to match CartBounty schema
         $wpdb->update(
             $table,
-            array( 'type' => 'recovered' ),
+            array( 'type' => 1 ),
             array( 'id' => $cart_id )
         );
 
