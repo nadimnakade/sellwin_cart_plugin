@@ -899,7 +899,28 @@ class CartBounty_REST_API {
         $email = isset( $row['email'] ) ? $row['email'] : '';
         $phone = isset( $row['phone'] ) ? $row['phone'] : '';
 
-        $order = wc_create_order();
+        // Try to find existing customer by email or phone
+        $customer_id = 0;
+
+        if ( ! empty( $email ) ) {
+            $customer_id = email_exists( $email );
+        }
+
+        // If no customer found by email, search by phone in user meta
+        if ( ! $customer_id && ! empty( $phone ) ) {
+            $users = get_users( array(
+                'meta_key'   => 'billing_phone',
+                'meta_value' => $phone,
+                'number'     => 1,
+            ));
+
+            if ( ! empty( $users ) ) {
+                $customer_id = $users[0]->ID;
+            }
+        }
+
+        // Create order with customer_id if found
+        $order = wc_create_order( array( 'customer_id' => $customer_id ) );
 
         $order->set_currency( isset( $row['currency'] ) ? $row['currency'] : get_woocommerce_currency() );
 
@@ -935,17 +956,37 @@ class CartBounty_REST_API {
         $order->calculate_totals();
         $order_id = $order->save();
 
-        // Use numeric type (1 = recovered) to match CartBounty schema
+        // Store order_id reference in order meta for tracking
+        $order->update_meta_data( '_converted_from_cart_id', $cart_id );
+        $order->save_meta_data();
+
+        // Mark cart as recovered (type=1) so customer's browser can detect it and clear their cart
         $wpdb->update(
             $table,
-            array( 'type' => 1 ),
-            array( 'id' => $cart_id )
+            array(
+                'type' => 1,
+                'other_fields' => maybe_serialize( array( 'order_id' => $order_id ) )
+            ),
+            array( 'id' => $cart_id ),
+            array( '%d', '%s' ),
+            array( '%d' )
         );
+
+        // Delete all duplicate carts with same session_id (but keep the converted one)
+        if ( ! empty( $row['session_id'] ) ) {
+            $wpdb->query( $wpdb->prepare(
+                "DELETE FROM $table WHERE session_id = %s AND id != %d",
+                $row['session_id'],
+                $cart_id
+            ));
+        }
 
         return new WP_REST_Response( array(
             'success'     => true,
             'order_id'    => $order_id,
             'orderNumber' => $order->get_order_number(),
+            'customer_id' => $customer_id,
+            'message'     => 'Cart converted to order. Customer cart will be cleared when they visit the website.',
         ), 200 );
     }
 }

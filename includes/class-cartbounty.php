@@ -174,6 +174,7 @@ class CartBounty{
 		$this->loader->add_action( 'wp', $public, 'restore_classic_checkout_fields', 10 );
 		$this->loader->add_action( 'shutdown', $public, 'restore_block_checkout_fields', 200 );
 		$this->loader->add_action( 'wp_footer', $public, 'display_exit_intent_form' );
+		$this->loader->add_action( 'wp_loaded', $public, 'check_and_clear_converted_cart', 20 );
 	}
 
 	/**

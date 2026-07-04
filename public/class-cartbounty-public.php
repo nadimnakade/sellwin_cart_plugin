@@ -1930,4 +1930,56 @@ class CartBounty_Public{
 
 		return $ip;
 	}
+
+	/**
+	 * Check if customer's cart was converted to order by admin and clear their WooCommerce cart
+	 *
+	 * @since    8.9
+	 */
+	function check_and_clear_converted_cart(){
+		if( !WC()->cart ) return; //Exit if WooCommerce cart has not been initialized
+		if( !WC()->session ) return; //Exit if session does not exist
+
+		// Get current session ID
+		$session_id = WC()->session->get( 'cartbounty_session_id' );
+
+		if( empty( $session_id ) ){
+			$session_id = get_current_user_id() ? (string) get_current_user_id() : WC()->session->get_customer_id();
+		}
+
+		if( empty( $session_id ) ) return;
+
+		// Check if we already cleared this session
+		if( WC()->session->get( 'cartbounty_cart_cleared' ) ) return;
+
+		global $wpdb;
+		$cart_table = $wpdb->prefix . CARTBOUNTY_TABLE_NAME;
+
+		// Check if any cart with this session_id was converted (type=1) or deleted
+		// If no abandoned cart record exists for this session, it might have been converted
+		$cart_exists = $wpdb->get_var( $wpdb->prepare(
+			"SELECT COUNT(*) FROM $cart_table WHERE session_id = %s AND type = 0",
+			$session_id
+		));
+
+		// Also check if there's a recent converted cart (type=1) for this session
+		$converted_cart = $wpdb->get_var( $wpdb->prepare(
+			"SELECT COUNT(*) FROM $cart_table WHERE session_id = %s AND type = 1",
+			$session_id
+		));
+
+		// If we have a converted cart record, clear the WooCommerce cart
+		if( $converted_cart > 0 ){
+			WC()->cart->empty_cart();
+			WC()->session->set( 'cartbounty_cart_cleared', true );
+
+			// Delete the converted cart record as well
+			$wpdb->delete( $cart_table, array( 'session_id' => $session_id, 'type' => 1 ), array( '%s', '%d' ) );
+
+			// Add a notice to inform the customer
+			if( function_exists('wc_add_notice') ){
+				wc_add_notice( __('Your cart has been converted to an order by our team. Your cart has been cleared.', 'woo-save-abandoned-carts'), 'notice' );
+			}
+		}
+	}
 }
