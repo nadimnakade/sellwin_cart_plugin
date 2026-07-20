@@ -4181,6 +4181,7 @@ class CartBounty_Admin{
 				FROM $cart_table
 				WHERE session_id = %s AND
 				cart_contents != '' AND
+				type = 0 AND
 				time > %s
 				ORDER BY time DESC",
 				$session_id,

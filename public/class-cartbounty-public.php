@@ -681,12 +681,12 @@ class CartBounty_Public{
 			}
 
 			//First part of the select that looks for the same session ID in the given time period
-			$sql = "SELECT id FROM $cart_table WHERE ( session_id = %s AND time > %s )";
+			$sql = "SELECT id FROM $cart_table WHERE ( session_id = %s AND time > %s AND type = 0 )";
 			$params = [ $cart['session_id'], $cooldown_period ];
 
 			//Second part of the select if we know the IP address which looks for the same IP address and cart contents in the given time period
 			if( !empty( $user_ip ) ){
-				$sql .= " OR ( ip_address = %s AND cart_hash = %s AND time > %s )";
+				$sql .= " OR ( ip_address = %s AND cart_hash = %s AND time > %s AND type = 0 )";
 				$params = array_merge( $params, [ $user_ip, $cart_hash, $ip_cooldown ] );
 			}
 
