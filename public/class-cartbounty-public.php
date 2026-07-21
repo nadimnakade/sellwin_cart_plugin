@@ -1949,20 +1949,31 @@ class CartBounty_Public{
 
 		if( empty( $session_id ) ) return;
 
+		// For logged-in users, sync session_id: if DB has old anonymous hash, update to user_id
+		if( get_current_user_id() ){
+			$user_id = (string) get_current_user_id();
+			if( $session_id !== $user_id ){
+				global $wpdb;
+				$cart_table = $wpdb->prefix . CARTBOUNTY_TABLE_NAME;
+				$wpdb->update(
+					$cart_table,
+					array( 'session_id' => $user_id ),
+					array( 'session_id' => $session_id ),
+					array( '%s' ),
+					array( '%s' )
+				);
+				WC()->session->set( 'cartbounty_session_id', $user_id );
+				$session_id = $user_id;
+			}
+		}
+
 		// Check if we already cleared this session
 		if( WC()->session->get( 'cartbounty_cart_cleared' ) ) return;
 
 		global $wpdb;
 		$cart_table = $wpdb->prefix . CARTBOUNTY_TABLE_NAME;
 
-		// Check if any cart with this session_id was converted (type=1) or deleted
-		// If no abandoned cart record exists for this session, it might have been converted
-		$cart_exists = $wpdb->get_var( $wpdb->prepare(
-			"SELECT COUNT(*) FROM $cart_table WHERE session_id = %s AND type = 0",
-			$session_id
-		));
-
-		// Also check if there's a recent converted cart (type=1) for this session
+		// Check if there's a recent converted cart (type=1) for this session
 		$converted_cart = $wpdb->get_var( $wpdb->prepare(
 			"SELECT COUNT(*) FROM $cart_table WHERE session_id = %s AND type = 1",
 			$session_id

@@ -186,8 +186,13 @@ class CartBounty_REST_API {
                     $thumbnail = get_the_post_thumbnail_url( $item['product_id'], 'thumbnail' );
                     $image_base64 = null;
 
-                    if ( $include_images && $product ) {
-                        $image_id = $product->get_image_id();
+                    // Try variation first for variable products
+                    $variation_id = isset( $item['product_variation_id'] ) ? (int) $item['product_variation_id'] : 0;
+                    $variation = $variation_id ? wc_get_product( $variation_id ) : null;
+                    $target_product = $variation ? $variation : $product;
+
+                    if ( $include_images && $target_product ) {
+                        $image_id = $target_product->get_image_id();
                         if ( $image_id ) {
                             $path = get_attached_file( $image_id );
                             if ( $path && file_exists( $path ) ) {
@@ -196,12 +201,32 @@ class CartBounty_REST_API {
                                     $image_base64 = 'data:' . $mime . ';base64,' . base64_encode( file_get_contents( $path ) );
                                 }
                             }
+                            // Fallback to parent product image if variation has no image
+                            if ( ! $image_base64 && $variation && $product ) {
+                                $parent_image_id = $product->get_image_id();
+                                if ( $parent_image_id ) {
+                                    $ppath = get_attached_file( $parent_image_id );
+                                    if ( $ppath && file_exists( $ppath ) ) {
+                                        $pmime = mime_content_type( $ppath );
+                                        if ( $pmime ) {
+                                            $image_base64 = 'data:' . $pmime . ';base64,' . base64_encode( file_get_contents( $ppath ) );
+                                        }
+                                    }
+                                }
+                                if ( ! $image_base64 && $product ) {
+                                    $thumbnail = get_the_post_thumbnail_url( $product->get_id(), 'thumbnail' );
+                                }
+                            }
                         }
                     }
 
                     $price = isset( $item['product_price'] ) ? (float) $item['product_price'] : 0;
-                    if ( $price <= 0 && $product && method_exists( $product, 'get_price' ) ) {
-                        $price = (float) $product->get_price();
+                    if ( $price <= 0 && $target_product && method_exists( $target_product, 'get_price' ) ) {
+                        $price = (float) $target_product->get_price();
+                    }
+                    // Last fallback: use line_total / quantity
+                    if ( $price <= 0 && isset( $item['line_total'] ) && isset( $item['quantity'] ) && $item['quantity'] > 0 ) {
+                        $price = (float) $item['line_total'] / (int) $item['quantity'];
                     }
 
                     $products[] = array(
@@ -212,7 +237,7 @@ class CartBounty_REST_API {
                         'subtotal'    => ( isset( $item['quantity'] ) ? (int) $item['quantity'] : 1 ) * $price,
                         'thumbnail'   => $thumbnail ? $thumbnail : '',
                         'imageBase64' => $image_base64,
-                        'sku'         => $product ? $product->get_sku() : '',
+                        'sku'         => $target_product ? $target_product->get_sku() : '',
                     );
                 }
             }
@@ -694,8 +719,13 @@ class CartBounty_REST_API {
                 $thumbnail = '';
                 $image_base64 = null;
 
-                if ( $product ) {
-                    $image_id = $product->get_image_id();
+                // Try variation first for variable products
+                $variation_id = isset( $item['product_variation_id'] ) ? (int) $item['product_variation_id'] : 0;
+                $variation = $variation_id ? wc_get_product( $variation_id ) : null;
+                $target_product = $variation ? $variation : $product;
+
+                if ( $target_product ) {
+                    $image_id = $target_product->get_image_id();
                     $thumbnail = wp_get_attachment_url( $image_id );
 
                     if ( $image_id && ! isset( $image_cache[ $image_id ] ) ) {
@@ -713,15 +743,46 @@ class CartBounty_REST_API {
                     }
 
                     $image_base64 = $image_cache[ $image_id ] ?? null;
+
+                    // Fallback to parent product image
+                    if ( ! $image_base64 && $variation && $product ) {
+                        $parent_image_id = $product->get_image_id();
+                        if ( $parent_image_id && ! isset( $image_cache[ $parent_image_id ] ) ) {
+                            $ppath = get_attached_file( $parent_image_id );
+                            if ( $ppath && file_exists( $ppath ) ) {
+                                $pmime = mime_content_type( $ppath );
+                                if ( $pmime ) {
+                                    $image_cache[ $parent_image_id ] = 'data:' . $pmime . ';base64,' . base64_encode( file_get_contents( $ppath ) );
+                                }
+                            }
+                            if ( ! isset( $image_cache[ $parent_image_id ] ) ) {
+                                $image_cache[ $parent_image_id ] = null;
+                            }
+                        }
+                        $image_base64 = $image_cache[ $parent_image_id ] ?? null;
+                        if ( $image_base64 && ! $thumbnail ) {
+                            $thumbnail = wp_get_attachment_url( $product->get_image_id() );
+                        }
+                    }
                 }
 
+                // Price resolution: product_price -> variation/parent price -> line_total/quantity
+                $price = isset( $item['product_price'] ) ? (float) $item['product_price'] : 0;
+                if ( $price <= 0 && $target_product && method_exists( $target_product, 'get_price' ) ) {
+                    $price = (float) $target_product->get_price();
+                }
+                if ( $price <= 0 && isset( $item['line_total'] ) && isset( $item['quantity'] ) && $item['quantity'] > 0 ) {
+                    $price = (float) $item['line_total'] / (int) $item['quantity'];
+                }
+
+                $qty = isset( $item['quantity'] ) ? (int) $item['quantity'] : 1;
                 $products[] = array(
                     'productId'   => (int) $item['product_id'],
                     'name'        => isset( $item['product_title'] ) ? $item['product_title'] : '',
-                    'sku'         => $product ? $product->get_sku() : '',
-                    'quantity'    => isset( $item['quantity'] ) ? (int) $item['quantity'] : 1,
-                    'price'       => isset( $item['product_price'] ) ? (float) $item['product_price'] : 0,
-                    'subtotal'    => ( isset( $item['quantity'] ) ? (int) $item['quantity'] : 1 ) * ( isset( $item['product_price'] ) ? (float) $item['product_price'] : 0 ),
+                    'sku'         => $target_product ? $target_product->get_sku() : '',
+                    'quantity'    => $qty,
+                    'price'       => $price,
+                    'subtotal'    => $qty * $price,
                     'image'       => $thumbnail,
                     'imageBase64' => $image_base64,
                 );
@@ -807,19 +868,48 @@ class CartBounty_REST_API {
                             $image_cache[ $image_id ] = null;
                         }
                     } else {
+                        // Fallback: try reading via wp_get_attachment_url remote fetch
                         $image_cache[ $image_id ] = null;
                     }
                 }
 
                 $image_base64 = $image_cache[ $image_id ] ?? null;
+
+                // Second fallback: try variation image or parent product image
+                if ( ! $image_base64 && $product->is_type( 'variation' ) ) {
+                    $parent_id = $product->get_parent_id();
+                    if ( $parent_id ) {
+                        $parent = wc_get_product( $parent_id );
+                        if ( $parent ) {
+                            $pid = $parent->get_image_id();
+                            if ( $pid && ! isset( $image_cache[ $pid ] ) ) {
+                                $ppath = get_attached_file( $pid );
+                                if ( $ppath && file_exists( $ppath ) ) {
+                                    $pmime = mime_content_type( $ppath );
+                                    if ( $pmime ) {
+                                        $image_cache[ $pid ] = 'data:' . $pmime . ';base64,' . base64_encode( file_get_contents( $ppath ) );
+                                    }
+                                }
+                                if ( ! isset( $image_cache[ $pid ] ) ) {
+                                    $image_cache[ $pid ] = null;
+                                }
+                            }
+                            $image_base64 = $image_cache[ $pid ] ?? null;
+                            if ( $image_base64 && ! $image_url ) {
+                                $image_url = wp_get_attachment_url( $pid );
+                            }
+                        }
+                    }
+                }
             }
 
+            $qty = max( 1, $item->get_quantity() );
             $items[] = array(
                 'productId'   => $item->get_product_id(),
                 'name'        => $item->get_name(),
                 'sku'         => $product ? $product->get_sku() : '',
                 'quantity'    => $item->get_quantity(),
-                'price'       => (float) $item->get_total(),
+                'price'       => (float) ( $item->get_total() / $qty ),
                 'subtotal'    => (float) $item->get_subtotal(),
                 'image'       => $image_url,
                 'imageBase64' => $image_base64,
